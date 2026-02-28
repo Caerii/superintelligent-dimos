@@ -481,6 +481,37 @@ def test_module_ref_spec() -> None:
 
 
 @pytest.mark.slow
+def test_disabled_modules_are_skipped_during_build() -> None:
+    pubsub.lcm.autoconf()
+
+    blueprint_set = autoconnect(module_a(), module_b(), module_c()).disabled_modules(ModuleC)
+
+    coordinator = blueprint_set.build(**_BUILD_WITHOUT_RERUN)
+
+    try:
+        assert coordinator.get_instance(ModuleA) is not None
+        assert coordinator.get_instance(ModuleB) is not None
+
+        assert coordinator.get_instance(ModuleC) is None
+    finally:
+        coordinator.stop()
+
+
+def test_autoconnect_merges_disabled_modules() -> None:
+    bp_a = Blueprint(
+        blueprints=module_a().blueprints,
+        disabled_modules_tuple=(ModuleA,),
+    )
+    bp_b = Blueprint(
+        blueprints=module_b().blueprints,
+        disabled_modules_tuple=(ModuleB,),
+    )
+
+    merged = autoconnect(bp_a, bp_b)
+    assert merged.disabled_modules_tuple == (ModuleA, ModuleB)
+
+
+@pytest.mark.slow
 def test_module_ref_remap_ambiguous() -> None:
     coordinator = (
         autoconnect(
