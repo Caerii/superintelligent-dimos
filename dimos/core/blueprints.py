@@ -56,6 +56,82 @@ class ModuleRef:
 
 
 @dataclass(frozen=True)
+class GraphNode:
+    id: str
+    label: str
+    kind: Literal["module", "detached"]
+
+
+@dataclass(frozen=True)
+class GraphEdge:
+    source: str
+    target: str
+    label: str
+    stream_name: str
+    stream_type: str
+    connected: bool
+    original_name: str | None = None
+    remapped_name: str | None = None
+
+
+@dataclass(frozen=True)
+class BlueprintGraph:
+    nodes: tuple[GraphNode, ...]
+    edges: tuple[GraphEdge, ...]
+
+    def to_mermaid(self) -> str:
+        """Render the graph as a Mermaid diagram string."""
+        lines = ["graph LR"]
+        for node in self.nodes:
+            safe_id = node.id.replace(" ", "_")
+            escaped_label = node.label.replace('"', '#quot;')
+            if node.kind == "detached":
+                lines.append(f'    {safe_id}[/"{escaped_label}"/]:::detached')
+            else:
+                lines.append(f'    {safe_id}["{escaped_label}"]:::module')
+        for edge in self.edges:
+            src = edge.source.replace(" ", "_")
+            tgt = edge.target.replace(" ", "_")
+            escaped_label = edge.label.replace('"', '#quot;')
+            if edge.connected:
+                lines.append(f'    {src} -->|"{escaped_label}"| {tgt}')
+            else:
+                lines.append(f'    {src} -.->|"{escaped_label}"| {tgt}')
+        lines.append("    classDef module fill:#2d2d2d,stroke:#4a9eff,color:#fff")
+        lines.append(
+            "    classDef detached fill:#4a2020,stroke:#ff6b6b,color:#ff6b6b,stroke-dasharray: 5 5"
+        )
+        return "\n".join(lines)
+
+    def open_in_browser(self) -> None:
+        """Render to an HTML file with Mermaid and open in the default browser."""
+        import os
+        import webbrowser
+
+        mermaid_code = self.to_mermaid()
+        html = f"""\
+<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8">
+<title>Blueprint Graph</title>
+<style>body {{ background: #1e1e1e; margin: 2em; }}</style>
+</head><body>
+<pre class="mermaid">
+{mermaid_code}
+</pre>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({{ startOnLoad: true, theme: 'dark' }});</script>
+</body></html>"""
+
+        path = os.path.join(os.path.expanduser("~"), "dimos_blueprint_graph.html")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(html)
+        print(f"Graph written to {path}")
+        webbrowser.open(f"file://{path}")
+
+
+@dataclass(frozen=True)
 class _BlueprintAtom:
     kwargs: dict[str, Any]
     module: type[ModuleBase[Any]]
@@ -491,6 +567,140 @@ class Blueprint:
                 instance.set_rpc_method(  # type: ignore[union-attr]
                     requested_method_name, rpc_methods_dot[requested_method_name]
                 )
+
+    def build_graph(self, *, open_in_browser: bool = False) -> "BlueprintGraph":
+        """Dry-run of build that constructs a graph of modules and streams.
+
+        Every node is a module, every edge is a stream connection.
+        Edges are labelled with stream name (and remapped name if different).
+        Detached streams (inputs/outputs with no matching counterpart) are shown
+        as stub nodes so you can see what isn't connected.
+
+        Args:
+            open_in_browser: If True, renders the graph to an HTML file with an
+                embedded Mermaid diagram and opens it in the default browser.
+
+        Returns:
+            A BlueprintGraph with nodes, edges, and rendering methods.
+        """
+        from collections import defaultdict as _defaultdict
+
+        nodes: list[GraphNode] = []
+        edges: list[GraphEdge] = []
+
+        # Build module nodes
+        module_names: dict[type, str] = {}
+        for bp in self.blueprints:
+            name = bp.module.__name__
+            module_names[bp.module] = name
+            nodes.append(GraphNode(id=name, label=name, kind="module"))
+
+        # Collect producers/consumers per (remapped_name, type)
+        producers: dict[tuple[str, type], list[tuple[type, str]]] = _defaultdict(list)
+        consumers: dict[tuple[str, type], list[tuple[type, str]]] = _defaultdict(list)
+
+        for bp in self.blueprints:
+            for conn in bp.streams:
+                remapped = self.remapping_map.get((bp.module, conn.name), conn.name)
+                if not isinstance(remapped, str):
+                    continue
+                key = (remapped, conn.type)
+                if conn.direction == "out":
+                    producers[key].append((bp.module, conn.name))
+                else:
+                    consumers[key].append((bp.module, conn.name))
+
+        # Create edges for connected streams (have both producer and consumer)
+        all_keys = set(producers.keys()) | set(consumers.keys())
+        connected_keys: set[tuple[str, type]] = set()
+
+        for key in all_keys:
+            remapped_name, stream_type = key
+            prods = producers.get(key, [])
+            cons = consumers.get(key, [])
+            if prods and cons:
+                connected_keys.add(key)
+                for prod_module, prod_original in prods:
+                    for cons_module, cons_original in cons:
+                        # Build label showing remapped name and originals if different
+                        label_parts = [remapped_name]
+                        annotations: list[str] = []
+                        if prod_original != remapped_name:
+                            annotations.append(f"{module_names[prod_module]}.{prod_original}")
+                        if cons_original != remapped_name:
+                            annotations.append(f"{module_names[cons_module]}.{cons_original}")
+                        type_label = stream_type.__name__
+                        label = f"{' | '.join(label_parts)}"
+                        if annotations:
+                            label += f" ({', '.join(annotations)})"
+                        label += f" [{type_label}]"
+
+                        edges.append(GraphEdge(
+                            source=module_names[prod_module],
+                            target=module_names[cons_module],
+                            label=label,
+                            stream_name=remapped_name,
+                            original_name=prod_original if prod_original != remapped_name else None,
+                            remapped_name=remapped_name if prod_original != remapped_name else None,
+                            stream_type=type_label,
+                            connected=True,
+                        ))
+
+        # Create detached nodes/edges for unconnected streams
+        detached_counter = 0
+        for key in all_keys:
+            if key in connected_keys:
+                continue
+            remapped_name, stream_type = key
+            type_label = stream_type.__name__
+
+            prods = producers.get(key, [])
+            cons = consumers.get(key, [])
+
+            for prod_module, prod_original in prods:
+                detached_counter += 1
+                stub_id = f"detached_out_{detached_counter}"
+                label_parts = [remapped_name]
+                if prod_original != remapped_name:
+                    label_parts.append(f"(from {prod_original})")
+                stub_label = f"? {' '.join(label_parts)} [{type_label}]"
+                nodes.append(GraphNode(id=stub_id, label=stub_label, kind="detached"))
+                edges.append(GraphEdge(
+                    source=module_names[prod_module],
+                    target=stub_id,
+                    label=f"{remapped_name} [{type_label}]",
+                    stream_name=remapped_name,
+                    original_name=prod_original if prod_original != remapped_name else None,
+                    remapped_name=remapped_name if prod_original != remapped_name else None,
+                    stream_type=type_label,
+                    connected=False,
+                ))
+
+            for cons_module, cons_original in cons:
+                detached_counter += 1
+                stub_id = f"detached_in_{detached_counter}"
+                label_parts = [remapped_name]
+                if cons_original != remapped_name:
+                    label_parts.append(f"(from {cons_original})")
+                stub_label = f"? {' '.join(label_parts)} [{type_label}]"
+                nodes.append(GraphNode(id=stub_id, label=stub_label, kind="detached"))
+                edges.append(GraphEdge(
+                    source=stub_id,
+                    target=module_names[cons_module],
+                    label=f"{remapped_name} [{type_label}]",
+                    stream_name=remapped_name,
+                    original_name=cons_original if cons_original != remapped_name else None,
+                    remapped_name=remapped_name if cons_original != remapped_name else None,
+                    stream_type=type_label,
+                    connected=False,
+                ))
+
+        graph = BlueprintGraph(nodes=tuple(nodes), edges=tuple(edges))
+
+        if open_in_browser:
+            graph.open_in_browser()
+
+        return graph
 
     def build(
         self,
