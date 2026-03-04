@@ -114,13 +114,67 @@ class BlueprintGraph:
 <html><head>
 <meta charset="utf-8">
 <title>Blueprint Graph</title>
-<style>body {{ background: #1e1e1e; margin: 2em; }}</style>
+<style>
+html, body {{ margin: 0; padding: 0; height: 100%; overflow: hidden; background: #1e1e1e; }}
+#container {{ width: 100%; height: 100%; }}
+svg {{ cursor: grab; }}
+svg:active {{ cursor: grabbing; }}
+</style>
 </head><body>
+<div id="container">
 <pre class="mermaid">
 {mermaid_code}
 </pre>
+</div>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-<script>mermaid.initialize({{ startOnLoad: true, theme: 'dark' }});</script>
+<script>
+mermaid.initialize({{ startOnLoad: true, theme: 'dark' }});
+
+// Pan & zoom after mermaid renders
+window.addEventListener('load', () => {{
+  setTimeout(() => {{
+    const svg = document.querySelector('svg');
+    if (!svg) return;
+    let scale = 1, panX = 0, panY = 0, dragging = false, startX, startY;
+
+    function applyTransform() {{
+      svg.style.transform = `translate(${{panX}}px, ${{panY}}px) scale(${{scale}})`;
+      svg.style.transformOrigin = '0 0';
+    }}
+
+    svg.addEventListener('wheel', (e) => {{
+      e.preventDefault();
+      const rect = svg.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+
+      const oldScale = scale;
+      const delta = e.deltaY > 0 ? 0.9 : 1.1;
+      scale = Math.min(Math.max(0.1, scale * delta), 10);
+
+      panX = e.clientX - (mouseX / oldScale) * scale - (rect.left - panX - e.clientX) * (scale / oldScale - 1);
+      panY = e.clientY - (mouseY / oldScale) * scale - (rect.top - panY - e.clientY) * (scale / oldScale - 1);
+      panX = e.clientX - ((e.clientX - panX) / oldScale) * scale;
+      panY = e.clientY - ((e.clientY - panY) / oldScale) * scale;
+
+      applyTransform();
+    }}, {{ passive: false }});
+
+    svg.addEventListener('mousedown', (e) => {{
+      dragging = true;
+      startX = e.clientX - panX;
+      startY = e.clientY - panY;
+    }});
+    window.addEventListener('mousemove', (e) => {{
+      if (!dragging) return;
+      panX = e.clientX - startX;
+      panY = e.clientY - startY;
+      applyTransform();
+    }});
+    window.addEventListener('mouseup', () => {{ dragging = false; }});
+  }}, 500);
+}});
+</script>
 </body></html>"""
 
         path = os.path.join(os.path.expanduser("~"), "dimos_blueprint_graph.html")
